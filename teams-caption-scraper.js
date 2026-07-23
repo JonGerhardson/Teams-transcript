@@ -45,7 +45,7 @@
 
   const state = {
     entries: [], live: new Map(), timer: null, lastSpeaker: '',
-    autosaveTimer: null, handle: null,
+    autosaveTimer: null, handle: null, jsonHandle: null,
   };
 
   // restore anything from a previous run / tab reload
@@ -164,39 +164,62 @@
       .join('\n');
   };
 
+  const renderJson = () => { flushLive(); return JSON.stringify(state.entries, null, 2); };
+
   const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
-  // Chromium can hold a writable handle and rewrite one file forever. Firefox
-  // has no equivalent, so it gets a fresh timestamped download each interval.
+  const writeHandle = async (handle, body) => {
+    const w = await handle.createWritable();
+    await w.write(body);
+    await w.close();
+  };
+
+  // Chromium can hold writable handles and rewrite the same files forever.
+  // Firefox has no equivalent, so it gets fresh timestamped downloads instead.
   const autosaveTick = async () => {
     const body = renderText();
     if (!body) return;
+    const json = renderJson();
+
     if (state.handle) {
       try {
-        const w = await state.handle.createWritable();
-        await w.write(body);
-        await w.close();
+        await writeHandle(state.handle, body);
+        if (state.jsonHandle) await writeHandle(state.jsonHandle, json);
         console.log(`[caps] autosaved ${state.entries.length} lines`);
         return;
       } catch (e) {
         console.warn('[caps] handle write failed, reverting to downloads', e);
-        state.handle = null;
+        state.handle = state.jsonHandle = null;
       }
     }
-    download(`teams-captions-${stamp()}.txt`, body);
+    const s = stamp();
+    download(`teams-captions-${s}.txt`, body);
+    download(`teams-captions-${s}.json`, json, 'application/json');
     console.log(`[caps] autosaved ${state.entries.length} lines (download)`);
   };
 
   window.TeamsCaps = {
     get entries() { flushLive(); return state.entries; },
     text: renderText,
-    // Chromium only: pick one file once, then every autosave rewrites it.
-    async pickFile() {
+    // Chromium only: pick the files once, then every autosave rewrites them.
+    // Pass false to skip the JSON and get a single dialog.
+    async pickFile(withJson = true) {
       if (!window.showSaveFilePicker) { console.warn('[caps] not supported in this browser'); return; }
+      const s = stamp();
       state.handle = await showSaveFilePicker({
-        suggestedName: `teams-captions-${stamp()}.txt`,
+        suggestedName: `teams-captions-${s}.txt`,
         types: [{ description: 'Text', accept: { 'text/plain': ['.txt'] } }],
       });
+      if (withJson) {
+        // A second picker can be refused for lack of user activation — the txt
+        // handle still stands, and JSON just falls back to periodic downloads.
+        try {
+          state.jsonHandle = await showSaveFilePicker({
+            suggestedName: `teams-captions-${s}.json`,
+            types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+          });
+        } catch (e) { console.warn('[caps] JSON handle not granted, txt only', e); }
+      }
       await autosaveTick();
     },
     autosave(min = AUTOSAVE_MIN) {
